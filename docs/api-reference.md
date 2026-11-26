@@ -455,7 +455,6 @@ Employer creates a salary stream and deposits funds into the contract escrow.
 `cancel_streams_batch`, `pause_stream` and `pause_stream_batch` reject the stream
 with `E036`. `top_up`, `withdraw`, `withdraw_all`, `withdraw_to` and
 `update_rate` continue to work. Read the flag with `is_immutable(stream_id) -> bool`.
-=======
 
 **Cliff behaviour:** `claimable` is 0 while `now < cliff_time`. Withdrawing,
 pausing/resuming or changing the rate before the cliff never moves accrual
@@ -885,11 +884,24 @@ Employee withdraws all claimable tokens from every stream they receive in a sing
 
 **Returns:** `Vec<i128>` — amounts transferred in employee stream-index order, with one entry per stream that paid out; empty if nothing was claimable
 
+**Per-call limit (SC-58):** A single `withdraw_all` call processes at most
+`MAX_WITHDRAW_ALL_BATCH` = **50** streams from the employee's index. Employees
+with more than 50 streams must call `withdraw_all` repeatedly; each call
+advances past the streams it processed, so successive calls drain the remaining
+streams. The call is atomic — either every stream in the chunk is paid out and
+persisted, or the whole call reverts, so no partial state is ever left behind.
+
+**Signalling remaining streams:** When the employee's index holds more streams
+than the cap, the call emits a `withdraw_all_chunked` event carrying the number
+of streams processed and the number still remaining (see
+[Events](#withdraw_all_chunked)). Clients should keep calling `withdraw_all`
+until the event reports `remaining = 0` (or the returned vector is empty).
+
 **Errors:**
 - Panics if contract is paused
 - E003 if a reentrant withdraw is detected on any stream
 
-**Gas note:** Each stream in the employee's index incurs one `token::transfer` cross-contract call. For a 10-stream portfolio this is roughly 10× the cost of a single `withdraw` call; plan accordingly for large indexes.
+**Gas note:** Each stream in the chunk incurs one `token::transfer` cross-contract call. For a 10-stream portfolio this is roughly 10× the cost of a single `withdraw` call; the 50-stream cap keeps a single call within the instruction budget.
 
 **Example:**
 ```bash
@@ -2826,6 +2838,24 @@ Emitted once per stream, by the first `withdraw`, `withdraw_all`,
 
 **Topics:** `("v1", "cliff", stream_id)`
 **Data:** `cliff_time: u64`
+
+---
+
+### `withdraw_all_chunked`
+
+Emitted by `withdraw_all` when the employee's stream index exceeds
+`MAX_WITHDRAW_ALL_BATCH` (50) and the call processed only a chunk of it
+(SC-58). Off-chain clients use it to detect that further `withdraw_all` calls
+are required.
+
+| Field | Type | Description |
+|---|---|---|
+| `employee` | `Address` | Employee whose streams were processed (in topics) |
+| `processed` | `u32` | Number of streams processed in this call (≤ 50) |
+| `remaining` | `u32` | Number of streams still left to process after this call |
+
+**Topics:** `("v1", "wa_chunk", employee)`
+**Data:** `(processed, remaining)`
 
 ---
 

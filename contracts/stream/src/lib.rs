@@ -1330,6 +1330,15 @@ impl StreamContract {
     /// Streams that are Cancelled or Paused are skipped without reverting.
     /// Streams where the claimable amount is zero are also skipped.
     ///
+    /// # Chunking limit (SC-58)
+    /// At most [`MAX_WITHDRAW_ALL_BATCH`] (50) streams are processed per call to
+    /// stay within the Soroban instruction budget. When the employee has more
+    /// streams than the limit, only the first chunk is processed; the number of
+    /// streams remaining is emitted via the `withdraw_all_chunked` event so
+    /// callers can loop until it reports zero. Each call is atomic: either the
+    /// whole chunk is applied or the transaction reverts, so no partial state
+    /// is left behind.
+    ///
     /// # Parameters
     /// - `employee` — employee address; must authenticate (requires auth, called once)
     ///
@@ -1347,7 +1356,7 @@ impl StreamContract {
 
         let stream_ids = get_employee_streams(&env, &employee);
         let mut results: Vec<i128> = Vec::new(&env);
-        
+
         // Return empty results gracefully if employee has no streams
         if stream_ids.is_empty() {
             return results;
@@ -1355,7 +1364,13 @@ impl StreamContract {
 
         let now = env.ledger().timestamp();
 
-        for stream_id in stream_ids.iter() {
+        // SC-58: cap the number of streams processed per call so a large
+        // employee index cannot exceed the instruction budget.
+        let total = stream_ids.len();
+        let processed = total.min(MAX_WITHDRAW_ALL_BATCH);
+        let remaining = total - processed;
+
+        for stream_id in stream_ids.iter().take(processed) {
             let mut stream = match load_stream(&env, stream_id) {
                 Some(s) => s,
                 None => continue,
@@ -1411,6 +1426,8 @@ impl StreamContract {
             results.push_back(amount);
         }
 
+        // Signal how many streams were left unprocessed so callers can loop.
+        events::withdraw_all_chunked(&env, &employee, processed, remaining);
         results
     }
 
@@ -3659,6 +3676,14 @@ impl StreamContract {
         let claimable = stream_claimable_amount(&env, &stream, now);
         claimable == 0
     }
+    /// Return the maximum number of streams processed per `withdraw_all` call.
+    ///
+    /// Exposed so off-chain clients can size their withdrawal loops without
+    /// hard-coding the limit.
+    pub fn max_withdraw_all_batch(_env: Env) -> u32 {
+        MAX_WITHDRAW_ALL_BATCH
+    }
+
     /// Return the current contract admin address.
     ///
     /// Off-chain tools use this to discover the admin without decoding raw

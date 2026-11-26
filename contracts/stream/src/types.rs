@@ -218,6 +218,10 @@ pub struct StreamParams {
     /// starts from `cliff_time` once passed. Must be <= `stop_time` when both
     /// are set.
     pub cliff_time: Option<u64>,
+    /// Optional lifetime-withdrawable cap (SC-97). When set, the stream stops
+    /// accruing/withdrawing once `withdrawn` reaches this value. `None` means
+    /// no cap.
+    pub max_withdrawable: Option<i128>,
 }
 
 /// Single beneficiary in a split stream, with their share in basis points.
