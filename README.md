@@ -27,8 +27,27 @@ PayStream lets employers stream salaries to employees in real-time, per-second. 
 - **Flexible** — pause, resume, top-up, or cancel streams; optional hard stop time
 - **Multi-token** — each stream can use any [SEP-41](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md) compliant token; employer and employee can run concurrent streams in different assets
 - **Native XLM** — stream Stellar's native asset via its Stellar Asset Contract (SAC) address; no custom token deployment needed (see [docs/testnet.md](docs/testnet.md#native-xlm-streams-sac))
+- **Multi-network** — the same indexer and dashboard stack runs against testnet or mainnet; the network is selected by environment, with per-network passphrase, RPC URL, and contract IDs validated at startup
 
 ---
+
+## Networks
+
+The indexer and API are not testnet-only. The active network is chosen by environment, and each network supplies its own passphrase, RPC endpoint, and contract IDs. Both the indexer and the API refuse to start if the configured passphrase does not match the network, and contract IDs are validated against the selected network before any work begins — so switching between testnet and mainnet requires no code changes.
+
+See the [operations runbook](docs/operations.md) for the full list of network environment variables and step-by-step instructions for switching networks.
+
+## Indexer Backfill & Catch-Up
+
+The indexer supports two historical modes alongside live streaming:
+
+- **Backfill** — replays contract events from a configurable start ledger (including genesis) to build state on a fresh deployment.
+- **Catch-up** — resumes from the persisted high-water mark after downtime, so no events are missed.
+
+Progress is observable and resumable: the high-water mark is persisted, so an interrupted backfill or catch-up continues where it left off. Backfill/catch-up and live modes never overlap, and events are not duplicated. See the [operations runbook](docs/operations.md) and the [dashboard README](dashboard/README.md) for configuration and monitoring details.
+
+---
+=======
 
 ## Architecture
 
@@ -135,6 +154,8 @@ make test
 # or: cargo test
 ```
 
+Project coverage is tracked by [Codecov](https://codecov.io/gh/veracindarella/paystream-contracts) and enforced via a required status check: the `codecov/project` check fails CI when total coverage drops below the floor configured in [`codecov.yml`](codecov.yml). Per-target coverage is reported for the `stream` and `token` contracts where useful.
+
 ### Format & Lint
 
 ```bash
@@ -210,3 +231,8 @@ To report a vulnerability, please **do not** open a public issue. Instead, email
 For encrypted reporting, use our PGP key (fingerprint published in [SECURITY.md](SECURITY.md)) or contact us via Signal at the number listed there.
 
 See [SECURITY.md](SECURITY.md) for the full disclosure policy and supported versions.
+
+## Handsoff notes
+
+<!-- handsoff-issue-428 -->
+- #428: SC-60: Add top_up_batch entrypoint
