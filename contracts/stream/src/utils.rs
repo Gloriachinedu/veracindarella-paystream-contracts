@@ -30,6 +30,45 @@ pub fn get_native_xlm_sac(env: &Env) -> Address {
         .deployed_address()
 }
 
+/// Cached cliff/schedule parameters for a single stream.
+///
+/// Reading cliff and schedule values from storage is expensive; this struct
+/// lets callers read them once and reuse the values across repeated
+/// `claimable_amount` computations (e.g. inside `withdraw_all`).
+#[derive(Clone, Copy)]
+pub struct StreamSchedule {
+    /// Timestamp at which the cliff ends (0 if no cliff).
+    pub cliff: u64,
+    /// Timestamp at which accrual starts.
+    pub accrual_start: u64,
+    /// Timestamp at which the stream ends.
+    pub end: u64,
+    /// Total amount streamed over the full duration.
+    pub total: i128,
+}
+
+impl StreamSchedule {
+    /// Compute the claimable amount for `now` using the cached schedule values.
+    ///
+    /// This performs no storage reads; all inputs are held in the struct so
+    /// repeated calls (e.g. per stream in `withdraw_all`) avoid redundant
+    /// cliff/schedule lookups while producing identical results.
+    pub fn claimable_amount(&self, now: u64) -> i128 {
+        if now < self.cliff || now < self.accrual_start {
+            return 0;
+        }
+        if now >= self.end {
+            return self.total;
+        }
+        let elapsed = (now - self.accrual_start) as i128;
+        let duration = (self.end - self.accrual_start) as i128;
+        if duration <= 0 {
+            return self.total;
+        }
+        self.total * elapsed / duration
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use soroban_sdk::Env;
@@ -45,5 +84,20 @@ mod tests {
         // On-chain, this would resolve to the actual native XLM SAC address.
         let _client = soroban_sdk::token::Client::new(&env, &native_xlm);
         // If we got here, the address is valid and usable
+    }
+
+    #[test]
+    fn test_stream_schedule_claimable_amount() {
+        let schedule = StreamSchedule {
+            cliff: 100,
+            accrual_start: 100,
+            end: 200,
+            total: 1000,
+        };
+        assert_eq!(schedule.claimable_amount(50), 0);
+        assert_eq!(schedule.claimable_amount(100), 0);
+        assert_eq!(schedule.claimable_amount(150), 500);
+        assert_eq!(schedule.claimable_amount(200), 1000);
+        assert_eq!(schedule.claimable_amount(250), 1000);
     }
 }
