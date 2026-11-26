@@ -29,8 +29,9 @@ Each entry lists the event, the change (added field / renamed topic / removed fi
 
 | Event | Change | Migration |
 |-------|--------|-----------|
-| `init`, `created`, `withdraw`, `status`, `cancelled`, `topup`, `paused`, `rate_upd`, `stop_upd`, `near_exp`, `exp_unres`, `upg_prop`, `upg_exec`, `upg_cncl`, `at_set`, `at_up`, `thresh_up`, `split`, `p_stats` | Baseline: topic prefixed with `"v1"` | None. Match on `topic[0] == "v1"`, then `topic[1]` |
+| `init`, `created`, `withdraw`, `status`, `cancelled`, `topup`, `paused`, `rate_upd`, `stop_upd`, `near_exp`, `exp_unres`, `upg_prop`, `upg_exec`, `upg_cncl`, `at_set`, `at_up`, `thresh_up`, `split`, `p_stats`, `cliff` | Baseline: topic prefixed with `"v1"` | None. Match on `topic[0] == "v1"`, then `topic[1]` |
 | `receipt`, `archived`, `expired`, `xfr_strm`, `low_bal` | Baseline: emitted **without** a version prefix | Match on `topic[0]` directly. A future version will add the `"v1"` prefix and list it here |
+| `transfer`, `approve`, `burn`, `mint` (token) | Baseline: token contract events, emitted **without** a version prefix | Match on `topic[0]` directly |
 
 ### v1.1 (2026-10-04) — batch threshold setter & cliff parity
 
@@ -50,7 +51,7 @@ Each entry lists the event, the change (added field / renamed topic / removed fi
 
 Current schema version: **v1**
 
-All event topics include the schema version as the first component to enable version detection and compatibility handling.
+Stream-contract event topics include the schema version as the first component to enable version detection and compatibility handling. A small set of legacy stream events and all token-contract events are emitted **without** a version prefix (see the changelog above).
 
 ### Contract Event Version (instance value)
 
@@ -71,14 +72,32 @@ Soroban events have two parts:
 - **Topic**: An array that identifies the event type and associated keys
 - **Data**: The event payload values
 
-Topics always follow this pattern:
+Versioned stream events follow this pattern:
 ```
 [<schema_version>, <event_name>, ...event_specific_keys]
 ```
 
+Unversioned events (legacy stream events and token events) follow:
+```
+[<event_name>, ...event_specific_keys]
+```
+
+## Completeness
+
+This document is the source of truth for the event surface. Every event emitted in
+`contracts/stream/src/events.rs` and `contracts/token/src/events.rs` must have an entry
+below. Each entry is keyed by the **exact topic name** (the string literal used in code)
+so a CI lint (BE-15) can extract emitted topics from the source and diff them against the
+`### <topic>` headings in this file.
+
+Rules for the lint:
+- One `### <topic>` heading per emitted topic name.
+- The heading text must equal the topic string literal in code (e.g. `### rate_upd`).
+- Each entry must declare `**Topic**` and `**Data**` lines.
+
 ## Events
 
-### contract_initialized
+### init
 
 Emitted when the contract is initialized with an admin address.
 
@@ -97,7 +116,7 @@ Emitted when the contract is initialized with an admin address.
 
 ---
 
-### stream_created
+### created
 
 Emitted when a new salary stream is created.
 
@@ -118,7 +137,7 @@ Emitted when a new salary stream is created.
 
 ---
 
-### withdrawn
+### withdraw
 
 Emitted when an employee withdraws tokens from a stream.
 
@@ -329,7 +348,7 @@ Indexers should map unknown symbols to `other` rather than dropping the event.
 
 ---
 
-### topped_up
+### topup
 
 Emitted when an employer adds more funds to an existing stream.
 
@@ -349,7 +368,7 @@ Emitted when an employer adds more funds to an existing stream.
 
 ---
 
-### auto_topup_set
+### at_set
 
 Emitted by `set_auto_topup` (`enabled = true`) and `cancel_auto_topup` (`enabled = false`).
 
@@ -368,7 +387,7 @@ Emitted by `set_auto_topup` (`enabled = true`) and `cancel_auto_topup` (`enabled
 
 ---
 
-### auto_topped_up
+### at_up
 
 Emitted after a `withdraw` / `withdraw_all` when an auto top-up successfully pulls funds from the employer.
 
@@ -388,7 +407,7 @@ Emitted after a `withdraw` / `withdraw_all` when an auto top-up successfully pul
 
 ---
 
-### contract_paused
+### paused
 
 Emitted when the contract-wide pause flag is toggled.
 
@@ -407,7 +426,7 @@ Emitted when the contract-wide pause flag is toggled.
 
 ---
 
-### rate_updated
+### rate_upd
 
 Emitted when a stream's rate_per_second is changed.
 
@@ -520,7 +539,7 @@ Emitted when a contract upgrade is proposed.
 
 ---
 
-### upgrade_executed
+### upg_exec
 
 Emitted when a contract upgrade is executed.
 
@@ -539,7 +558,7 @@ Emitted when a contract upgrade is executed.
 
 ---
 
-### upgrade_cancelled
+### upg_cncl
 
 Emitted when a pending contract upgrade is cancelled.
 
@@ -601,6 +620,7 @@ Emitted by `migrate` while backfilling indexes for legacy streams. Bounded per c
 | Address | Stellar address (32 bytes) | `GABCD...` |
 | i128 | Signed 128-bit integer | `1000000` |
 | u64 | Unsigned 64-bit integer | `1234567890` |
+| u32 | Unsigned 32-bit integer | `123456` |
 | bool | Boolean | `true` or `false` |
 | BytesN<32> | Fixed 32-byte array | `abcd1234...` |
 | StreamStatus enum | Stream status (0-3) | `0`, `1`, `2`, or `3` |
@@ -651,13 +671,25 @@ function parseV1Event(topic, data) {
   switch (eventName) {
     case "created":
       return {
-        type: "stream_created",
+        type: "created",
         streamId: topic[2],
         employer: data[0],
         employee: data[1],
         rate: data[2]
       };
     // ... other events
+  }
+}
+
+function parseUnversionedEvent(topic, data) {
+  const eventName = topic[0];
+
+  switch (eventName) {
+    case "receipt":
+      return { type: "receipt", streamId: topic[1], employee: data[0], amount: data[1] };
+    case "transfer":
+      return { type: "transfer", from: topic[1], to: topic[2], amount: data[0] };
+    // ... other unversioned events
   }
 }
 ```

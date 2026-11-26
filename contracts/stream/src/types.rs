@@ -412,8 +412,11 @@ pub enum DataKey {
 /// | E021 | ERR_ADMIN_NOT_SET       | Admin has not been initialised                     |
 /// | E022 | ERR_STOP_TIME_PAST      | `stop_time` must be in the future                  |
 /// | E023 | ERR_AMOUNT_NOT_POSITIVE | Amount must be positive                            |
-/// | E025 | ERR_INVALID_AUTO_TOPUP  | Invalid auto top-up parameters                     |
-/// | E026 | ERR_NO_AUTO_TOPUP       | No auto top-up configured for the stream           |
+/// | E024 | ERR_BAD_PENDING_NONCE   | Invalid pending admin nonce                        |
+/// | E025 | ERR_NO_PENDING_UPGRADE  | No pending upgrade proposal                        |
+/// | E026 | ERR_DRAIN_NOT_PAUSED    | Contract must be paused before emergency drain     |
+/// | E027 | ERR_NO_PENDING_DRAIN    | No pending emergency drain proposal                |
+/// | E028 | ERR_NEW_EMPLOYER_IS_EMPLOYEE | new_employer equals employee                  |
 /// | E029 | ERR_BATCH_TOO_LARGE     | Batch contains more than 50 streams                |
 /// | E036 | ERR_EMPTY_UPDATES       | Batch threshold update list must not be empty      |
 /// Error returned when a payroll rate is zero.
@@ -546,20 +549,20 @@ pub const ERR_STOP_TIME_TOO_FAR: &str = "E030: stop_time must not exceed 10 year
 pub const MAX_STOP_TIME_OFFSET: u64 = 315_360_000;
 
 // Restored from a97bb5d (dropped by a merge).
-/// E030: per-employer, per-ledger stream creation rate limit exceeded.
-pub const ERR_RATE_LIMIT_EXCEEDED: &str = "E030: stream creation rate limit exceeded for this ledger";
+/// E037: per-employer, per-ledger stream creation rate limit exceeded.
+pub const ERR_RATE_LIMIT_EXCEEDED: &str = "E037: stream creation rate limit exceeded for this ledger";
 
 // Restored from a97bb5d (dropped by a merge).
 /// Default maximum number of streams an employer may create in a single ledger.
 pub const DEFAULT_MAX_CREATES_PER_LEDGER: u32 = 50;
 
 // Restored from cf48a49 (dropped by a merge).
-/// E030: split beneficiary basis points must sum to 10000 (100%)
-pub const ERR_SPLIT_BASIS_INVALID: &str = "E030: split beneficiary basis points must sum to 10000";
+/// E038: split beneficiary basis points must sum to 10000 (100%)
+pub const ERR_SPLIT_BASIS_INVALID: &str = "E038: split beneficiary basis points must sum to 10000";
 
 // Restored from cf48a49 (dropped by a merge).
-/// E031: split stream must have at least 2 beneficiaries
-pub const ERR_SPLIT_TOO_FEW: &str = "E031: split stream must have at least 2 beneficiaries";
+/// E033: split stream must have at least 2 beneficiaries
+pub const ERR_SPLIT_TOO_FEW: &str = "E033: split stream must have at least 2 beneficiaries";
 
 // Restored from cf48a49 (dropped by a merge).
 /// E032: split stream cannot have more than 20 beneficiaries
@@ -570,28 +573,28 @@ pub const ERR_SPLIT_TOO_MANY: &str = "E032: split stream cannot have more than 2
 pub const MAX_SPLIT_BENEFICIARIES: u32 = 20;
 
 // Restored from c3cb54c (dropped by a merge).
-/// `update_stop_time` would move the stop time before the last withdrawal.
-pub const ERR_INVALID_STOP_TIME: &str = "E030: stop_time precedes last_withdraw_time";
+/// E039: `update_stop_time` would move the stop time before the last withdrawal.
+pub const ERR_INVALID_STOP_TIME: &str = "E039: stop_time precedes last_withdraw_time";
 
 // Restored from a74e8f6 (dropped by a merge).
 /// `execute_upgrade` was called before the timelock expired.
 pub const ERR_UPGRADE_TIMELOCK_ACTIVE: &str = "E034: upgrade timelock has not yet expired";
 
 // Restored from ce6fe77 (dropped by a merge).
-/// `archive_stream` was called on a stream that is still Active or Paused.
-pub const ERR_STREAM_NOT_ENDED: &str = "E030: stream is not cancelled or exhausted";
+/// E040: `archive_stream` was called on a stream that is still Active or Paused.
+pub const ERR_STREAM_NOT_ENDED: &str = "E040: stream is not cancelled or exhausted";
 
 // Restored from a74e8f6 (dropped by a merge).
-/// No auto top-up is configured for the stream.
-pub const ERR_NO_AUTO_TOPUP: &str = "E031: no auto top-up configured for this stream";
+/// E041: no auto top-up is configured for the stream.
+pub const ERR_NO_AUTO_TOPUP: &str = "E041: no auto top-up configured for this stream";
 
 // Restored from a74e8f6 (dropped by a merge).
-/// Auto top-up threshold, amount or cap is not positive / consistent.
-pub const ERR_INVALID_AUTO_TOPUP: &str = "E030: invalid auto top-up parameters";
+/// E042: auto top-up threshold, amount or cap is not positive / consistent.
+pub const ERR_INVALID_AUTO_TOPUP: &str = "E042: invalid auto top-up parameters";
 
 // Restored from ce6fe77 (dropped by a merge).
-/// `archive_stream` was called before `ARCHIVE_WAIT_PERIOD` elapsed.
-pub const ERR_ARCHIVE_TOO_EARLY: &str = "E031: archive waiting period has not elapsed";
+/// E043: `archive_stream` was called before `ARCHIVE_WAIT_PERIOD` elapsed.
+pub const ERR_ARCHIVE_TOO_EARLY: &str = "E043: archive waiting period has not elapsed";
 
 /// `withdraw_amount` was called with an amount greater than claimable (SC-81).
 pub const ERR_EXCEEDS_CLAIMABLE: &str = "E036: amount exceeds claimable balance";
