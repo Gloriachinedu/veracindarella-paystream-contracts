@@ -27,6 +27,7 @@ MuxedAddress, amount: i128)`), against soroban-sdk 28.0.0.
 | `decimals() -> u32` | ✅ | Defaults to 7 (as the SAC) until set once by the admin via `set_metadata`. |
 | `name() -> String` | ✅ | Default `"PayStream Token"`; set-once via `set_metadata`. |
 | `symbol() -> String` | ✅ | Default `"PST"`; set-once via `set_metadata`. |
+| `metadata() -> TokenMetadata` | ➕ | Non-standard convenience query (TOK-32): returns `{name, symbol, decimal}` in a single call instead of three round-trips. Read-only and backed by the same write-once storage as `decimals`/`name`/`symbol`, so results are cache-friendly and stable once `set_metadata` has been called. |
 
 ## Events
 
