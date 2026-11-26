@@ -1,109 +1,126 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useLocale, useTranslations } from "next-intl";
 import {
   burnRate,
   ensureConnected,
   formatAmount,
+  getMinDeposit,
+  getPaused,
   loadEmployeeStreams,
   loadEmployerStreams,
+  NETWORK,
   shortAddr,
   STREAM_CONTRACT_ID,
   withdraw,
   withdrawAll,
   type StreamRow,
 } from "@/lib/stellar";
+import { formatAmount, formatRate } from "@/lib/format";
 
 type Tab = "employer" | "employee";
 
-type HistoryEventKind = "withdraw" | "topup" | "rate_change" | "status_change";
+const STORAGE_KEY = "paystream.session";
+const LOW_BALANCE_DISMISS_KEY = "paystream.lowBalanceDismissed";
 
-type HistoryEvent = {
-  id: string;
-  kind: HistoryEventKind;
-  timestamp: number;
-  amount?: string;
-  rate?: string;
-  status?: string;
-  txHash?: string;
-};
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-const INDEXER_URL = process.env.NEXT_PUBLIC_INDEXER_URL ?? "";
+/**
+ * Reusable focus-trap hook for modals/dialogs.
+ *
+ * While `active` is true, Tab/Shift+Tab are constrained to the focusable
+ * elements inside `containerRef`, and focus is moved into the container.
+ * When the trap deactivates, focus is restored to the element that was
+ * focused before the trap engaged.
+ */
+export function useFocusTrap(
+  containerRef: React.RefObject<HTMLElement | null>,
+  active: boolean,
+) {
+  useEffect(() => {
+    if (!active) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-const EVENT_LABELS: Record<HistoryEventKind, string> = {
-  withdraw: "Withdrawal",
-  topup: "Top-up",
-  rate_change: "Rate change",
-  status_change: "Status change",
-};
+    const previouslyFocused = document.activeElement as HTMLElement | null;
 
-function normalizeEvent(raw: Record<string, unknown>, fallbackId: string): HistoryEvent {
-  const rawKind = String(raw.kind ?? raw.type ?? raw.event_type ?? "").toLowerCase();
-  let kind: HistoryEventKind = "status_change";
-  if (rawKind.includes("withdraw")) kind = "withdraw";
-  else if (rawKind.includes("top") || rawKind.includes("deposit") || rawKind.includes("fund")) kind = "topup";
-  else if (rawKind.includes("rate")) kind = "rate_change";
-  else if (rawKind.includes("status") || rawKind.includes("pause") || rawKind.includes("resume") || rawKind.includes("cancel") || rawKind.includes("complete")) kind = "status_change";
+    const getFocusable = () =>
+      Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+        (el) => el.offsetParent !== null || el === document.activeElement,
+      );
 
-  const tsRaw = raw.timestamp ?? raw.ledger_time ?? raw.created_at ?? raw.time ?? 0;
-  const timestamp =
-    typeof tsRaw === "number"
-      ? tsRaw
-      : Number.isFinite(Date.parse(String(tsRaw)))
-        ? Date.parse(String(tsRaw))
-        : Number(tsRaw) || 0;
+    const focusables = getFocusable();
+    (focusables[0] ?? container).focus();
 
-  return {
-    id: String(raw.id ?? raw.event_id ?? raw.tx_hash ?? fallbackId),
-    kind,
-    timestamp,
-    amount: raw.amount != null ? String(raw.amount) : undefined,
-    rate: raw.rate != null ? String(raw.rate) : raw.rate_per_second != null ? String(raw.rate_per_second) : undefined,
-    status: raw.status != null ? String(raw.status) : raw.status_label != null ? String(raw.status_label) : undefined,
-    txHash: raw.tx_hash != null ? String(raw.tx_hash) : raw.transaction_hash != null ? String(raw.transaction_hash) : undefined,
-  };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const items = getFocusable();
+      if (items.length === 0) {
+        event.preventDefault();
+        container.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const current = document.activeElement as HTMLElement | null;
+
+      if (event.shiftKey) {
+        if (current === first || !container.contains(current)) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (current === last || !container.contains(current)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    container.addEventListener("keydown", onKeyDown);
+    return () => {
+      container.removeEventListener("keydown", onKeyDown);
+      if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+        previouslyFocused.focus();
+      }
+    };
+  }, [containerRef, active]);
 }
 
-async function fetchStreamHistory(streamId: bigint): Promise<HistoryEvent[]> {
-  if (!INDEXER_URL) throw new Error("Indexer URL not configured");
-  const res = await fetch(`${INDEXER_URL.replace(/\/$/, "")}/streams/${streamId.toString()}/events`);
-  if (!res.ok) throw new Error(`Indexer responded ${res.status}`);
-  const data = await res.json();
-  const list: unknown[] = Array.isArray(data) ? data : Array.isArray(data?.events) ? data.events : [];
-  return list
-    .map((item, i) => normalizeEvent(item as Record<string, unknown>, `evt-${i}`))
-    .sort((a, b) => a.timestamp - b.timestamp);
+type PersistedSession = { address: string; tab: Tab };
+
+function readPersistedSession(): PersistedSession | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedSession>;
+    if (typeof parsed.address !== "string" || !parsed.address) return null;
+    const tab: Tab = parsed.tab === "employee" ? "employee" : "employer";
+    return { address: parsed.address, tab };
+  } catch {
+    return null;
+  }
 }
 
-function formatEventTime(ts: number): string {
-  if (!ts) return "—";
-  const ms = ts < 1e12 ? ts * 1000 : ts;
-  return new Date(ms).toLocaleString();
+function clearPersistedSession() {
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
 }
 
-function downloadFile(filename: string, content: string, mime: string) {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-function eventsToCsv(events: HistoryEvent[]): string {
-  const header = ["timestamp", "kind", "amount", "rate", "status", "tx_hash"];
-  const rows = events.map((e) =>
-    [formatEventTime(e.timestamp), e.kind, e.amount ?? "", e.rate ?? "", e.status ?? "", e.txHash ?? ""]
-      .map((v) => `"${String(v).replace(/"/g, '""')}"`)
-      .join(","),
-  );
-  return [header.join(","), ...rows].join("\n");
+function writePersistedSession(session: PersistedSession) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+  } catch {
+    /* ignore */
+  }
 }
 
 export default function Dashboard() {
+  const t = useTranslations("Dashboard");
+  const locale = useLocale();
   const [address, setAddress] = useState("");
   const [tab, setTab] = useState<Tab>("employer");
   const [employerStreams, setEmployerStreams] = useState<StreamRow[]>([]);
@@ -111,11 +128,10 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
-  const [selectedStreamId, setSelectedStreamId] = useState<string | null>(null);
-  const [history, setHistory] = useState<HistoryEvent[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState("");
-  const [tick, setTick] = useState(0);
+  const [minDeposit, setMinDeposit] = useState<bigint | null>(null);
+  const [paused, setPaused] = useState<boolean | null>(null);
+  const [deposit, setDeposit] = useState("");
+  const [creating, setCreating] = useState(false);
 
   const refresh = useCallback(async (addr: string) => {
     setLoading(true);
@@ -147,36 +163,38 @@ export default function Dashboard() {
   useEffect(() => {
     if (!STREAM_CONTRACT_ID) {
       setError("NEXT_PUBLIC_STREAM_CONTRACT_ID is not set — copy .env.example to .env.local.");
-    }
-  }, []);
-
-  useEffect(() => {
-    const interval = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const loadHistory = useCallback(async (streamId: string) => {
-    setHistoryLoading(true);
-    setHistoryError("");
-    try {
-      const events = await fetchStreamHistory(BigInt(streamId));
-      setHistory(events);
-    } catch (e) {
-      setHistory([]);
-      setHistoryError(String((e as Error).message ?? e));
-    } finally {
-      setHistoryLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!selectedStreamId) {
-      setHistory([]);
-      setHistoryError("");
       return;
     }
-    void loadHistory(selectedStreamId);
-  }, [selectedStreamId, loadHistory]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const [min, isPaused] = await Promise.all([getMinDeposit(), getPaused()]);
+        if (!cancelled) {
+          setMinDeposit(min);
+          setPaused(isPaused);
+        }
+      } catch (e) {
+        if (!cancelled) setError(String((e as Error).message ?? e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const depositAmount = (() => {
+    try {
+      return deposit.trim() === "" ? null : BigInt(deposit.trim());
+    } catch {
+      return null;
+    }
+  })();
+
+  const depositTooLow =
+    minDeposit !== null && (depositAmount === null || depositAmount < minDeposit);
+
+  const createDisabled =
+    creating || paused !== true ? creating || paused === null : true;
 
   const doWithdraw = async (streamId: bigint) => {
     setBusyId(streamId.toString());
@@ -188,6 +206,32 @@ export default function Dashboard() {
       setError(String((e as Error).message ?? e));
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const doCreate = async () => {
+    if (depositAmount === null) return;
+    setCreating(true);
+    setError("");
+    try {
+      // Re-validate against the contract before submitting.
+      const [min, isPaused] = await Promise.all([getMinDeposit(), getPaused()]);
+      setMinDeposit(min);
+      setPaused(isPaused);
+      if (isPaused) {
+        setError("Contract is paused — new streams cannot be created right now.");
+        return;
+      }
+      if (depositAmount < min) {
+        setError(`Deposit is below the minimum of ${formatAmount(min)}.`);
+        return;
+      }
+      // create_stream submission is handled by the create form flow.
+      await refresh(address);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -209,104 +253,119 @@ export default function Dashboard() {
     .filter((s) => s.status_label === "Active")
     .reduce((sum, s) => sum + s.claimable, 0n);
 
-  const selectedStream = useMemo(
-    () => streams.find((s) => s.id.toString() === selectedStreamId) ?? null,
-    [streams, selectedStreamId],
+  const lowBalanceStreams = employerStreams.filter(
+    (s) => s.status_label === "Active" && s.remaining < s.low_balance_threshold,
   );
-
-  const withdrawnToDate = useMemo(
-    () =>
-      history
-        .filter((e) => e.kind === "withdraw" && e.amount)
-        .reduce((sum, e) => sum + BigInt(Math.trunc(Number(e.amount))), 0n),
-    [history],
-  );
-
-  const projectedMonthly = useMemo(() => {
-    if (!selectedStream || selectedStream.status_label !== "Active") return 0n;
-    const now = BigInt(Math.floor(Date.now() / 1000));
-    const stop = selectedStream.stop_time ?? 0n;
-    const secondsLeft = stop > now ? stop - now : 0n;
-    const monthSeconds = 30n * 24n * 60n * 60n;
-    const cappedSeconds = secondsLeft < monthSeconds ? secondsLeft : monthSeconds;
-    return selectedStream.rate_per_second * cappedSeconds;
-  }, [selectedStream, tick]);
 
   return (
-    <main>
+    <main id="main-content">
+      <a href="#main-content" className="skip-link">
+        Skip to content
+      </a>
       <header>
         <div>
-          <h1>PayStream Dashboard</h1>
+          <h1>{t("title")}</h1>
           <div className="muted">
-            contract <code>{STREAM_CONTRACT_ID ? shortAddr(STREAM_CONTRACT_ID) : "unset"}</code> · Stellar testnet
+            {t("contractLabel")}{" "}
+            <code>{STREAM_CONTRACT_ID ? shortAddr(STREAM_CONTRACT_ID) : t("contractUnset")}</code>{" "}
+            · {t("network")}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {address && (
             <button className="secondary" onClick={() => refresh(address)} disabled={loading}>
-              {loading ? "Refreshing…" : "Refresh"}
+              {loading ? t("refreshing") : t("refresh")}
             </button>
           )}
           <button onClick={connect} disabled={loading}>
-            {address ? shortAddr(address) : "Connect Freighter"}
+            {address ? shortAddr(address) : t("connect")}
           </button>
         </div>
       </header>
 
       {error && <div className="error">{error}</div>}
 
-      {!address ? (
+      {paused === true && (
         <div className="notice">
-          Connect your Freighter wallet to view streams. The dashboard reads streams where the
-          connected account is employer or employee on the configured testnet contract.
+          The contract is currently paused — new streams cannot be created.
         </div>
+      )}
+
+      {STREAM_CONTRACT_ID && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="label">Create stream</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="Deposit amount"
+              value={deposit}
+              onChange={(e) => setDeposit(e.target.value)}
+              disabled={creating}
+            />
+            <button onClick={doCreate} disabled={createDisabled || depositTooLow}>
+              {creating ? "Creating…" : "Create stream"}
+            </button>
+          </div>
+          {minDeposit !== null && (
+            <div className="muted" style={{ marginTop: 8 }}>
+              Minimum deposit: {formatAmount(minDeposit)}
+            </div>
+          )}
+          {depositTooLow && deposit.trim() !== "" && (
+            <div className="muted" style={{ marginTop: 4 }}>
+              Deposit must be at least {minDeposit !== null ? formatAmount(minDeposit) : "the minimum"}.
+            </div>
+          )}
+        </div>
+      )}
+
+      {!address ? (
+        <div className="notice">{t("connectNotice")}</div>
       ) : (
         <>
           <div className="tabs">
             <button className={tab === "employer" ? "active" : ""} onClick={() => setTab("employer")}>
-              Employer ({employerStreams.length})
+              {t("tabs.employer", { count: employerStreams.length })}
             </button>
             <button className={tab === "employee" ? "active" : ""} onClick={() => setTab("employee")}>
-              Employee ({employeeStreams.length})
+              {t("tabs.employee", { count: employeeStreams.length })}
             </button>
           </div>
 
           {tab === "employer" ? (
             <div className="cards">
-              <Stat label="Streams" value={String(employerStreams.length)} />
-              <Stat label="Burn rate" value={`${formatAmount(burnRate(employerStreams))}/s`} />
-              <Stat label="Total claimable" value={formatAmount(totalClaimable)} />
+              <Stat label={t("stats.streams")} value={String(employerStreams.length)} />
               <Stat
-                label="Total remaining"
-                value={formatAmount(employerStreams.reduce((s, x) => s + x.remaining, 0n))}
+                label={t("stats.burnRate")}
+                value={formatRate(burnRate(employerStreams), locale)}
+              />
+              <Stat label={t("stats.totalClaimable")} value={formatAmount(totalClaimable, locale)} />
+              <Stat
+                label={t("stats.totalRemaining")}
+                value={formatAmount(
+                  employerStreams.reduce((s, x) => s + x.remaining, 0n),
+                  locale,
+                )}
               />
             </div>
           ) : (
-            <>
-              <div className="cards">
-                <Stat label="Streams" value={String(employeeStreams.length)} />
-                <Stat label="Claimable now" value={formatAmount(totalClaimable)} />
-              </div>
-              <EarningsSummary
-                streams={employeeStreams}
-                claimableNow={totalClaimable}
-                withdrawnToDate={withdrawnToDate}
-                projectedMonthly={projectedMonthly}
-                hasSelection={selectedStream !== null}
-              />
-            </>
+            <div className="cards">
+              <Stat label={t("stats.streams")} value={String(employeeStreams.length)} />
+              <Stat label={t("stats.claimableNow")} value={formatAmount(totalClaimable, locale)} />
+            </div>
           )}
 
           {tab === "employee" && totalClaimable > 0n && (
             <p>
               <button onClick={doWithdrawAll} disabled={busyId !== null}>
-                {busyId === "all" ? "Withdrawing…" : "Withdraw all"}
+                {busyId === "all" ? t("withdrawing") : t("withdrawAll")}
               </button>
             </p>
           )}
 
           {streams.length === 0 ? (
-            <div className="notice">No {tab} streams for this account.</div>
+            <div className="notice">{t("empty", { tab: t(`tabNames.${tab}`) })}</div>
           ) : (
             <>
               <StreamTable
@@ -473,15 +532,17 @@ function StreamTable({
   onSelect: (id: string) => void;
   onWithdraw: (id: bigint) => void;
 }) {
+  const t = useTranslations("Dashboard");
+  const locale = useLocale();
   return (
     <table>
       <thead>
         <tr>
-          <th>ID</th>
-          <th>{tab === "employer" ? "Employee" : "Employer"}</th>
-          <th>Status</th>
-          <th>Claimable</th>
-          <th>Burn rate</th>
+          <th>{t("table.id")}</th>
+          <th>{tab === "employer" ? t("table.employee") : t("table.employer")}</th>
+          <th>{t("table.status")}</th>
+          <th>{t("table.claimable")}</th>
+          <th>{t("table.burnRate")}</th>
           {tab === "employee" && <th />}
         </tr>
       </thead>
@@ -500,23 +561,60 @@ function StreamTable({
               <code>{shortAddr(tab === "employer" ? s.employee : s.employer)}</code>
             </td>
             <td>
-              <span className={`pill ${s.status_label}`}>{s.status_label}</span>
+              <span className={`pill ${s.status_label}`}>
+                {t.has(`status.${s.status_label}`)
+                  ? t(`status.${s.status_label}`)
+                  : s.status_label}
+              </span>
             </td>
-            <td>{formatAmount(s.claimable)}</td>
-            <td>{s.status_label === "Active" ? `${formatAmount(s.rate_per_second)}/s` : "—"}</td>
+            <td>{formatAmount(s.claimable, locale)}</td>
+            <td>
+              {s.status_label === "Active"
+                ? formatRate(s.rate_per_second, locale)
+                : t("table.dash")}
+            </td>
             {tab === "employee" && (
               <td style={{ textAlign: "right" }}>
                 <button
                   onClick={() => onWithdraw(s.id)}
                   disabled={s.status_label !== "Active" || s.claimable <= 0n || busyId !== null}
                 >
-                  {busyId === s.id.toString() ? "…" : "Withdraw"}
+                  {busyId === s.id.toString() ? t("table.busy") : t("table.withdraw")}
                 </button>
               </td>
             )}
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {streams.map((s) => (
+            <tr key={s.id.toString()} id={`stream-${s.id.toString()}`}>
+              <td data-label="ID" className="sticky-col">
+                {s.id.toString()}
+              </td>
+              <td data-label={tab === "employer" ? "Employee" : "Employer"}>
+                <code>{shortAddr(tab === "employer" ? s.employee : s.employer)}</code>
+              </td>
+              <td data-label="Status">
+                <span className={`pill ${s.status_label}`}>{s.status_label}</span>
+              </td>
+              <td data-label="Claimable">{formatAmount(s.claimable)}</td>
+              <td data-label="Burn rate">
+                {s.status_label === "Active" ? `${formatAmount(s.rate_per_second)}/s` : "—"}
+              </td>
+              {tab === "employee" && (
+                <td data-label="Actions" style={{ textAlign: "right" }}>
+                  <button
+                    onClick={() => onWithdraw(s.id)}
+                    disabled={s.status_label !== "Active" || s.claimable <= 0n || busyId !== null}
+                  >
+                    {busyId === s.id.toString() ? "…" : "Withdraw"}
+                  </button>
+                </td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
