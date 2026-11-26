@@ -4,7 +4,8 @@
 
 extern crate std;
 
-use crate::{TokenContract, TokenContractClient, TokenError};
+use crate::types::TokenDataKey;
+use crate::{TokenContract, TokenContractClient, TOKEN_CONTRACT_VERSION};
 use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{vec, Address, Env, Vec};
 
@@ -709,4 +710,165 @@ fn test_mint_to_batch_cap_exceeded() {
         client.try_mint_to_batch(&admin, &0, &recipients),
         Err(Ok(TokenError::BatchTooLarge))
     );
+}
+
+// ---------------------------------------------------------------------------
+// TOK-33 – per-recipient cap in mint_to_batch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_recipient_cap_defaults_to_uncapped() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    assert_eq!(client.get_recipient_cap(), 0);
+    client.mint_to_batch(&admin, &0, &vec![&env, (Address::generate(&env), 1_000_000)]);
+    assert_eq!(client.total_supply(), 1_001_000);
+}
+
+#[test]
+fn test_mint_to_batch_within_cap_succeeds() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let a = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    client.set_recipient_cap(&admin, &0, &100);
+    assert_eq!(client.get_recipient_cap(), 100);
+    client.mint_to_batch(&admin, &1, &vec![&env, (a.clone(), 100)]);
+    assert_eq!(client.balance(&a), 100);
+}
+
+#[test]
+#[should_panic(expected = "T006: amount exceeds per-recipient cap")]
+fn test_mint_to_batch_boundary_over_cap_rejected() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let a = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    client.set_recipient_cap(&admin, &0, &100);
+    // One over the cap must be rejected ...
+    client.mint_to_batch(&admin, &1, &vec![&env, (a.clone(), 101)]);
+}
+
+#[test]
+fn test_mint_to_batch_all_or_nothing_on_cap_violation() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    client.set_recipient_cap(&admin, &0, &100);
+    let recipients = vec![&env, (a.clone(), 50), (b.clone(), 101)];
+    let result = client.try_mint_to_batch(&admin, &1, &recipients);
+    assert!(result.is_err());
+    // The whole batch must revert: `a` must not have been credited either.
+    assert_eq!(client.balance(&a), 0);
+    assert_eq!(client.total_supply(), 1_000);
+}
+
+#[test]
+#[should_panic(expected = "not admin")]
+fn test_set_recipient_cap_non_admin_rejected() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    client.set_recipient_cap(&Address::generate(&env), &0, &100);
+}
+
+// ---------------------------------------------------------------------------
+// TOK-32 – metadata() struct query
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_metadata_defaults() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    let meta = client.metadata();
+    assert_eq!(meta.decimal, 7);
+    assert_eq!(meta.name, soroban_sdk::String::from_str(&env, "PayStream Token"));
+    assert_eq!(meta.symbol, soroban_sdk::String::from_str(&env, "PST"));
+    assert_eq!(client.decimals(), 7);
+}
+
+#[test]
+fn test_metadata_reflects_set_metadata() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    let name = soroban_sdk::String::from_str(&env, "Example");
+    let symbol = soroban_sdk::String::from_str(&env, "EX");
+    client.set_metadata(&admin, &9, &name, &symbol);
+    let meta = client.metadata();
+    assert_eq!(meta.decimal, 9);
+    assert_eq!(meta.name, name);
+    assert_eq!(meta.symbol, symbol);
+    assert_eq!(client.name(), name);
+    assert_eq!(client.symbol(), symbol);
+    assert_eq!(client.decimals(), 9);
+}
+
+#[test]
+#[should_panic(expected = "metadata already set")]
+fn test_set_metadata_write_once() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    let name = soroban_sdk::String::from_str(&env, "A");
+    let symbol = soroban_sdk::String::from_str(&env, "A");
+    client.set_metadata(&admin, &1, &name, &symbol);
+    client.set_metadata(&admin, &1, &name, &symbol);
+}
+
+// ---------------------------------------------------------------------------
+// TOK-31 – upgrade timelock snapshot coverage
+// ---------------------------------------------------------------------------
+
+/// Snapshot: full upgrade lifecycle. Asserts every field at every step so a
+/// schema or behaviour regression (wrong unlock time, pending not cleared,
+/// version not stamped, nonce not consumed) fails this test.
+#[test]
+fn test_execute_upgrade_after_timelock_snapshot() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    assert_eq!(client.version(), TOKEN_CONTRACT_VERSION);
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.upgrade(&admin, &0, &zero_hash(&env));
+    let pending = client.pending_upgrade().unwrap();
+    assert_eq!(pending.wasm_hash, zero_hash(&env));
+    assert_eq!(pending.unlock_time, 1_000 + 86_400);
+    assert_eq!(client.admin_nonce(), 1);
+
+    // Exactly at unlock_time the timelock has elapsed.
+    env.ledger().with_mut(|l| l.timestamp = 1_000 + 86_400);
+    client.execute_upgrade(&admin, &1);
+    assert!(client.pending_upgrade().is_none());
+    assert_eq!(client.admin_nonce(), 2);
+
+    client.migrate(&admin, &2);
+    assert_eq!(client.version(), TOKEN_CONTRACT_VERSION);
+    assert_eq!(client.admin_nonce(), 3);
+}
+
+/// Snapshot: cancelling a pending upgrade leaves balances, supply and
+/// version untouched and frees the nonce for reuse by other admin calls.
+#[test]
+fn test_cancel_upgrade_leaves_state_snapshot() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &1_000);
+    client.upgrade(&admin, &0, &zero_hash(&env));
+
+    client.cancel_upgrade(&admin, &1);
+    assert!(client.pending_upgrade().is_none());
+    assert_eq!(client.total_supply(), 1_000);
+    assert_eq!(client.balance(&admin), 1_000);
+    assert_eq!(client.version(), TOKEN_CONTRACT_VERSION);
+    assert_eq!(client.admin_nonce(), 2);
+
+    // Nonce 2 is now valid for a subsequent admin call.
+    client.migrate(&admin, &2);
+    assert_eq!(client.version(), TOKEN_CONTRACT_VERSION);
 }

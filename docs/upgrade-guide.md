@@ -7,7 +7,7 @@ PayStream uses Soroban's native WASM upgrade mechanism. The contract address nev
 1. **Build** the new contract version
 2. **Upload** the new WASM to the ledger (produces a WASM hash)
 3. **Call `upgrade`** on the deployed contract with the new WASM hash (admin only)
-4. **Call `migrate`** if the new version requires data-model changes (admin only, no-op in base version)
+4. **Call `migrate`** if the new version requires data-model changes (admin only; idempotent, version-gated, and bounded per call — see below)
 
 > **Admin runbook:** for the concrete, copy-paste timelock flow
 > (propose → wait → execute → migrate → verify), see
@@ -55,32 +55,38 @@ stellar contract invoke \
   --admin <ADMIN_ADDRESS>
 ```
 
-### 5. Verify the deployment
+#### What `migrate` does
+
+- **Stamps the event version.** On `initialize` and on `migrate`, the contract sets the
+  `contract_event_version` instance value. Indexers read this value to detect the event
+  schema in use without resyncing; see [`docs/events-schema.md`](events-schema.md).
+- **Backfills indexes for legacy streams.** Streams created before the new indexes
+  (SC-88, SC-53) were added have no index entries. `migrate` walks existing `Stream`
+  records and writes the missing index entries.
+- **Version-gated.** The migration is recorded in instance storage. Once the stored
+  migration version matches the contract's current version, further calls are a no-op,
+  so it is safe to call `migrate` at any time (including twice in a row).
+- **Bounded per call.** Each invocation processes a bounded batch of legacy streams and
+  emits a progress event so operators can track completion. If there are more legacy
+  streams than fit in one batch, call `migrate` again until the progress event reports
+  that the backfill is complete.
+
+#### Running it repeatedly
 
 ```bash
-stellar contract invoke \
-  --id <STREAM_CONTRACT_ID> \
-  --source-account <ADMIN_IDENTITY> \
-  --network testnet \
-  -- get_admin
-# confirm the returned admin matches <ADMIN_ADDRESS>
-
-stellar contract invoke \
-  --id <STREAM_CONTRACT_ID> \
-  --source-account <ADMIN_IDENTITY> \
-  --network testnet \
-  -- get_version
-# confirm the reported version matches the newly deployed build
+# Repeat until the progress event reports completion (or the call becomes a no-op)
+for i in $(seq 1 20); do
+  stellar contract invoke \
+    --id <STREAM_CONTRACT_ID> \
+    --source-account <ADMIN_IDENTITY> \
+    --network testnet \
+    -- migrate \
+    --admin <ADMIN_ADDRESS>
+done
 ```
 
-See the verify-deploy step in [`docs/upgrade-runbook.md`](upgrade-runbook.md)
-for the full post-upgrade verification checklist.
-
-### Rollback
-
-If an upgrade must be reverted, follow the rollback procedure in
-[`docs/upgrade-runbook.md`](upgrade-runbook.md) (OPS-51). Do not attempt a
-manual rollback outside that procedure.
+Because the step is idempotent and version-gated, re-running it after completion is
+harmless and produces no additional storage writes.
 
 ## Storage compatibility
 
@@ -89,6 +95,10 @@ Soroban's upgrade replaces only the WASM bytecode. All `persistent` and `instanc
 - New keys with `unwrap_or` defaults are safe — they return the default until explicitly set
 - Renamed or removed keys require a `migrate` implementation to transform existing data
 - The `DataKey` enum is `#[contracttype]` — adding new variants is backward-compatible
+- New indexes over existing data must be backfilled by `migrate`; the version gate ensures
+  the backfill runs once and the bounded batches keep each call within resource limits
+- `contract_event_version` is an instance value set on `initialize`/`migrate`; it does not
+  change event payloads, so current consumers see no behavior change
 
 ## Security
 
