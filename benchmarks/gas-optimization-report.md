@@ -114,6 +114,32 @@ The batch API therefore reduces contract/RPC round trips by 90% for 10 streams a
 
 ---
 
+## `withdraw_all` — 50-stream gas benchmark (Issue #476 / SC-108)
+
+A dedicated CI benchmark now measures `withdraw_all` across **50 active streams** to guard the SC-58 chunking behaviour against regressions.
+
+**How it runs:**
+- The benchmark job (`benchmarks/` suite) executes `withdraw_all` with 50 streams, all with claimable tokens, and records CPU instructions, memory bytes, and ledger read/write bytes.
+- The measured CPU instruction count is compared against the committed baseline in `benchmarks/baseline.json` (`withdraw_all_50_streams` = **74,360,000 CPU instructions**).
+- A **10% tolerance** gate is applied: the run fails if measured CPU instructions exceed `baseline × 1.10` (i.e. > 81,796,000).
+- **CI fails on regression** — any result outside tolerance blocks the merge, so chunking or storage changes that inflate per-stream cost are caught before landing.
+
+**Baseline reference:**
+
+| Metric | Baseline (50 streams) | Tolerance | Fail threshold |
+|---|---|---|---|
+| CPU instructions | 74,360,000 | +10% | 81,796,000 |
+| Memory bytes | recorded in `benchmarks/baseline.json` | +10% | baseline × 1.10 |
+| Ledger read bytes | recorded in `benchmarks/baseline.json` | +10% | baseline × 1.10 |
+| Ledger write bytes | recorded in `benchmarks/baseline.json` | +10% | baseline × 1.10 |
+
+**Key observations:**
+- Cost remains linear in the number of streams with claimable tokens (~1.49M CPU per stream), consistent with the 10-stream measurement above.
+- Streams with 0 claimable or Cancelled/Paused status are still skipped at near-zero cost.
+- When the baseline is intentionally improved, update `benchmarks/baseline.json` in the same PR so the gate tracks the new expected cost.
+
+---
+
 ## `create_streams_batch` — per-token transfer consolidation (PROD-02)
 
 `create_streams_batch` now validates every stream, sums deposits per token, and performs **one** `token::transfer` per distinct token instead of one per stream.

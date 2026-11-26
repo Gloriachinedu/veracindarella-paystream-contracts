@@ -166,67 +166,40 @@ Run `claimable` again — it restarts from near `0` and keeps growing.
 
 ---
 
-## SDK quickstart (TypeScript and Python)
+## Switching networks
 
-The CLI steps above use raw `stellar contract invoke` calls. If you are building an
-application, use the typed SDK clients instead. Two runnable examples live in this repo:
+The quickstart above targets **testnet**, but the same stack (contracts, indexer,
+API, dashboard) runs against **mainnet** without code changes. The network is
+selected entirely through environment variables:
 
-- [`examples/sdk-quickstart-ts`](../examples/sdk-quickstart-ts) — TypeScript with
-  [`@stellar/stellar-sdk`](https://www.npmjs.com/package/@stellar/stellar-sdk)
-- [`examples/sdk-quickstart-py`](../examples/sdk-quickstart-py) — Python with
-  [`stellar-sdk`](https://pypi.org/project/stellar-sdk/)
+| Variable | Purpose | Testnet example |
+| --- | --- | --- |
+| `NETWORK` | Network name used by the indexer/API | `testnet` |
+| `NETWORK_PASSPHRASE` | Stellar network passphrase | `Test SDF Network ; September 2015` |
+| `RPC_URL` | Soroban RPC endpoint | `https://soroban-testnet.stellar.org` |
+| `STREAM_CONTRACT_ID` | PayStream contract ID for that network | see [testnet.md](testnet.md#current-contract-ids) |
 
-Each example creates a stream, queries `claimable` and `stream_status`, and withdraws
-from it end-to-end against Stellar Testnet.
-
-### Configuration
-
-Both examples read the same environment variables:
-
-| Variable | Description |
-| --- | --- |
-| `STREAM_ID` | PayStream contract ID (see [testnet.md](testnet.md#current-contract-ids)) |
-| `TOKEN_ID` | Token contract ID (native SAC by default) |
-| `EMPLOYER_SECRET` | Secret key of the employer account (funds the stream) |
-| `EMPLOYEE_SECRET` | Secret key of the employee account (withdraws) |
-| `RPC_URL` | Optional, defaults to `https://soroban-testnet.stellar.org` |
-| `NETWORK_PASSPHRASE` | Optional, defaults to `Test SDF Network ; September 2015` |
-
-You can reuse the keys created in section 2:
+To switch to mainnet, set the same variables to the mainnet values (see
+[mainnet.md](mainnet.md)) and restart the indexer and API:
 
 ```bash
-export STREAM_ID=<STREAM_CONTRACT_ID_FROM_TESTNET_MD>
-export TOKEN_ID=$(stellar contract id asset --asset native --network testnet)
-export EMPLOYER_SECRET=$(stellar keys show employer)
-export EMPLOYEE_SECRET=$(stellar keys show employee)
+export NETWORK=mainnet
+export NETWORK_PASSPHRASE="Public Global Stellar Network ; September 2015"
+export RPC_URL=https://soroban-mainnet.stellar.org
+export STREAM_CONTRACT_ID=<MAINNET_STREAM_CONTRACT_ID>
 ```
 
-### TypeScript
+Safety checks:
 
-```bash
-cd examples/sdk-quickstart-ts
-npm install
-npm run start
-```
+- **Passphrase mismatch** — the indexer and API verify that `NETWORK_PASSPHRASE`
+  matches the passphrase reported by `RPC_URL` and **refuse to start** if they
+  disagree, so you cannot accidentally index or serve the wrong network.
+- **Contract ID validation** — `STREAM_CONTRACT_ID` (and any other configured
+  contract IDs) are validated against the selected network; IDs that do not
+  exist on that network cause startup to fail with a clear error.
 
-The script builds a typed `Contract` client from the contract spec, submits
-`create_stream`, polls `claimable` until it is non-zero, prints `stream_status`,
-and finally calls `withdraw`. See the example's README for details.
-
-### Python
-
-```bash
-cd examples/sdk-quickstart-py
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python quickstart.py
-```
-
-The Python script performs the same create → query → withdraw flow using
-`stellar_sdk` and the contract spec.
-
-Both examples are exercised in CI as part of the documentation build to catch
-drift in the SDK APIs.
+Per-network values (passphrase, RPC URL, contract IDs) are documented in
+[testnet.md](testnet.md) and [mainnet.md](mainnet.md).
 
 ---
 

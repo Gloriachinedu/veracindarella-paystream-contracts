@@ -21,6 +21,9 @@ Thank you for contributing to PayStream — a Soroban smart contract system for 
 - [Questions & Discussions](#questions--discussions)
 - [Pull Request Process](#pull-request-process)
 - [Changelog](#changelog)
+- [SDK Bindings](#sdk-bindings)
+  - [Regenerating bindings](#regenerating-bindings)
+  - [Drift check in CI](#drift-check-in-ci)
 - [Testing Requirements](#testing-requirements)
   - [Updating Snapshots](#updating-snapshots)
 - [Writing Fuzz Targets](#writing-fuzz-targets)
@@ -484,6 +487,39 @@ Prefix each entry with the issue ID when there is one:
 ### Releases
 
 When cutting a release, a maintainer renames `[Unreleased]` to `[x.y.z] - YYYY-MM-DD` (following Semantic Versioning), adds a fresh empty `[Unreleased]` section above it, and tags the release commit.
+
+---
+
+## SDK Bindings
+
+The public contract interface is committed as a machine-readable spec at [`contracts/stream/interface.json`](contracts/stream/interface.json). SDK bindings (TypeScript, Rust, and other client stubs) are **generated** from that spec — never edit generated binding files by hand.
+
+### Regenerating bindings
+
+After any change to the contract's public interface (entry points, argument types, return types, or events), regenerate the bindings and commit the result in the same PR:
+
+```bash
+make bindings        # regenerate SDK bindings from contracts/stream/interface.json
+```
+
+The underlying script is `scripts/check-interface.sh`, which can also be invoked directly:
+
+```bash
+./scripts/check-interface.sh --generate   # regenerate bindings
+./scripts/check-interface.sh --check      # verify committed bindings match the spec
+```
+
+Review the diff before committing. A binding change means the client-facing API changed — update `docs/api-reference.md` and add a `CHANGELOG.md` entry in the same PR.
+
+### Drift check in CI
+
+CI runs `scripts/check-interface.sh --check`, which regenerates the bindings from `contracts/stream/interface.json` and diffs them against the committed files. **If the committed bindings drift from the spec, the build fails.** To fix a failing drift check:
+
+1. Run `make bindings` locally.
+2. Commit the regenerated binding files.
+3. Push — CI will re-run the check.
+
+If `interface.json` itself is out of date relative to the contract source, update the spec first (see `scripts/check-interface.sh` for the extraction step), then regenerate the bindings.
 
 ---
 

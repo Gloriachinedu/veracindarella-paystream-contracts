@@ -10,13 +10,29 @@ mod types;
 mod test;
 
 use crate::storage::{
-    admin_nonce, allowance, balance_of, clear_pending_admin, consume_admin_nonce, get_admin,
-    get_pending_admin, has_admin, is_paused, set_admin, set_allowance, set_balance,
-    set_paused, set_pending_admin, set_total_supply, total_supply,
+    admin_nonce, allowance, balance_of, clear_pending_admin, clear_pending_upgrade,
+    consume_admin_nonce, extend_instance_ttl, get_admin, get_metadata, get_pending_admin,
+    get_pending_upgrade, has_admin, has_metadata, is_paused, max_supply, recipient_cap,
+    set_admin, set_allowance,
+    set_balance, set_max_supply as store_max_supply, set_paused, set_pending_admin,
+    set_pending_upgrade, set_recipient_cap as store_recipient_cap, set_total_supply,
+    store_metadata, total_supply, version as stored_version, set_version as store_version,
 };
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, BytesN, Env, Symbol, Vec};
+use crate::types::{PendingUpgrade, TokenMetadata};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short, Address, BytesN, Env, MuxedAddress, String, Symbol, Vec,
+};
 
-pub use crate::storage::{TTL_EXTEND_TO, TTL_THRESHOLD};
+pub use crate::storage::{TTL_EXTEND_TO, TTL_THRESHOLD, UPGRADE_TIMELOCK};
+
+/// TOK-15: no max supply configured.
+const ERR_MAX_SUPPLY: &str = "T002: max supply exceeded";
+/// T003: no upgrade is currently pending.
+const ERR_NO_PENDING_UPGRADE: &str = "T003: no pending upgrade";
+/// T004: the upgrade time-lock has not yet elapsed.
+const ERR_UPGRADE_TIMELOCK_ACTIVE: &str = "T004: upgrade timelock active";
+/// T006: mint_to_batch amount exceeds the configured per-recipient cap.
+const ERR_RECIPIENT_CAP_EXCEEDED: &str = "T006: amount exceeds per-recipient cap";
 
 /// TOK-18: current token contract version, stamped on `initialize` and `migrate`.
 pub const TOKEN_CONTRACT_VERSION: u32 = 1;
@@ -68,7 +84,7 @@ impl TokenContract {
         set_admin(&env, &admin);
         set_balance(&env, &admin, initial_supply);
         set_total_supply(&env, initial_supply);
-        set_version(&env, TOKEN_CONTRACT_VERSION);
+        store_version(&env, TOKEN_CONTRACT_VERSION);
         extend_instance_ttl(&env);
     }
 
@@ -156,26 +172,42 @@ impl TokenContract {
         allowance(&env, &owner, &spender).0
     }
 
+    /// Return name, symbol and decimals in a single call (TOK-32).
+    ///
+    /// Reduces round-trips versus calling `name`/`symbol`/`decimals`
+    /// separately; read-only and safe to cache.
+    ///
+    /// # Returns
+    /// The stored [`TokenMetadata`], or the defaults (7, "PayStream Token",
+    /// "PST") if [`set_metadata`] has never been called.
+    pub fn metadata(env: Env) -> TokenMetadata {
+        get_metadata(&env).unwrap_or_else(|| TokenMetadata {
+            decimal: 7,
+            name: String::from_str(&env, "PayStream Token"),
+            symbol: String::from_str(&env, "PST"),
+        })
+    }
+
     /// Number of decimals used to display amounts (SEP-41).
     pub fn decimals(env: Env) -> u32 {
-        metadata(&env).decimal
+        Self::metadata(env).decimal
     }
 
     /// Human-readable token name (SEP-41).
     pub fn name(env: Env) -> String {
-        metadata(&env).name
+        Self::metadata(env).name
     }
 
     /// Ticker symbol (SEP-41).
     pub fn symbol(env: Env) -> String {
-        metadata(&env).symbol
+        Self::metadata(env).symbol
     }
 
     /// Set token metadata once (admin only).
     ///
-    /// Until called, `decimals` / `name` / `symbol` return the defaults (7,
-    /// "PayStream Token", "PST"). Metadata is write-once so wallets and
-    /// indexers can cache it.
+    /// Until called, `decimals` / `name` / `symbol` / `metadata` return the
+    /// defaults (7, "PayStream Token", "PST"). Metadata is write-once so
+    /// wallets and indexers can cache it.
     ///
     /// # Errors
     /// - Panics if `admin` auth fails or does not match the stored admin
@@ -184,7 +216,7 @@ impl TokenContract {
         admin.require_auth();
         assert_eq!(get_admin(&env), admin, "not admin");
         assert!(!has_metadata(&env), "metadata already set");
-        set_metadata(&env, &TokenMetadata { decimal, name, symbol });
+        store_metadata(&env, &TokenMetadata { decimal, name, symbol });
     }
 
     /// Transfer `amount` tokens from `from` to `to` using `spender`'s allowance.
@@ -212,6 +244,25 @@ impl TokenContract {
         set_allowance(&env, &from, &spender, allowed - amount, expiration_ledger);
         move_balance(&env, &from, &to, amount);
         events::transfer(&env, &from, &to, None, amount);
+    }
+
+    /// Return the max supply cap (TOK-15); 0 means uncapped.
+    pub fn get_max_supply(env: Env) -> i128 {
+        max_supply(&env)
+    }
+
+    /// Admin sets (or clears, with `0`) the max supply cap (TOK-15).
+    ///
+    /// # Errors
+    /// - Panics if `admin` auth fails or does not match stored admin
+    /// - Panics if `nonce` does not match the stored admin nonce
+    /// - Panics if `cap` is negative
+    pub fn set_max_supply(env: Env, admin: Address, nonce: u64, cap: i128) {
+        admin.require_auth();
+        assert_eq!(get_admin(&env), admin, "not admin");
+        consume_admin_nonce(&env, nonce);
+        assert!(cap >= 0, "cap must be non-negative");
+        store_max_supply(&env, cap);
     }
 
     /// Mint `amount` new tokens to `to`, increasing total supply.
@@ -263,14 +314,19 @@ impl TokenContract {
     /// - T003 if `recipients` has more than [`MAX_MINT_BATCH`] entries
     /// - Panics if any amount ≤ 0
     /// - T001 if any balance or the total supply would overflow
+    /// - T006 (TOK-33) if any single amount exceeds the configured
+    ///   per-recipient cap (see [`set_recipient_cap`]); the whole batch
+    ///   reverts, same as any other failure above
     pub fn mint_to_batch(env: Env, admin: Address, nonce: u64, recipients: Vec<(Address, i128)>) {
         admin.require_auth();
         assert_eq!(get_admin(&env), admin, "not admin");
         assert!(recipients.len() <= MAX_MINT_BATCH, "{}", ERR_BATCH_TOO_LARGE);
         consume_admin_nonce(&env, nonce);
+        let cap = recipient_cap(&env);
         let mut supply = total_supply(&env);
         for (to, amount) in recipients.iter() {
             assert!(amount > 0, "amount must be positive");
+            assert!(cap == 0 || amount <= cap, "{}", ERR_RECIPIENT_CAP_EXCEEDED);
             supply = supply.checked_add(amount).expect(ERR_OVERFLOW);
             let to_bal = balance_of(&env, &to)
                 .checked_add(amount)
@@ -279,6 +335,28 @@ impl TokenContract {
             emit_mint(&env, &admin, &to, amount);
         }
         set_total_supply(&env, supply);
+    }
+
+    /// Return the per-recipient cap enforced by [`mint_to_batch`] (TOK-33).
+    ///
+    /// `0` (the default) means no cap is enforced.
+    pub fn get_recipient_cap(env: Env) -> i128 {
+        recipient_cap(&env)
+    }
+
+    /// Admin sets (or clears, with `0`) the per-recipient cap enforced by
+    /// [`mint_to_batch`] (TOK-33). Default is off (uncapped).
+    ///
+    /// # Errors
+    /// - Panics if `admin` auth fails or does not match stored admin
+    /// - Panics if `nonce` does not match the stored admin nonce
+    /// - Panics if `cap` is negative
+    pub fn set_recipient_cap(env: Env, admin: Address, nonce: u64, cap: i128) {
+        admin.require_auth();
+        assert_eq!(get_admin(&env), admin, "not admin");
+        consume_admin_nonce(&env, nonce);
+        assert!(cap >= 0, "cap must be non-negative");
+        store_recipient_cap(&env, cap);
     }
 
     /// Return the current admin nonce expected by admin-gated functions.
@@ -411,13 +489,13 @@ impl TokenContract {
         admin.require_auth();
         assert_eq!(get_admin(&env), admin, "not admin");
         consume_admin_nonce(&env, nonce);
-        set_version(&env, TOKEN_CONTRACT_VERSION);
+        store_version(&env, TOKEN_CONTRACT_VERSION);
         extend_instance_ttl(&env);
     }
 
     /// Return the stored contract version; 0 if never stamped.
     pub fn version(env: Env) -> u32 {
-        version(&env)
+        stored_version(&env)
     }
 
     /// Step 1 of two-step admin transfer: current admin nominates `new_admin`.

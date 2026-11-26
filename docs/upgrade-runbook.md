@@ -40,6 +40,11 @@ nonce() { stellar contract invoke --id $ID --source $ADMIN --network $NET -- adm
    ```
    Announce the upgrade, the hash, and the unlock time to integrators.
 3. **Wait** until ledger timestamp ≥ `unlock_time`. Calling `execute_upgrade` earlier fails with E026.
+   You can confirm the queued hash and unlock time at any point with:
+   ```bash
+   stellar contract invoke --id $ID --network $NET -- get_pending_upgrade
+   ```
+   The query returns `Some((wasm_hash, unlock_time))` while a proposal is pending, or `None` if none exists.
 4. **Execute.**
    ```bash
    stellar contract invoke --id $ID --source $ADMIN --network $NET -- execute_upgrade --nonce $(nonce)
