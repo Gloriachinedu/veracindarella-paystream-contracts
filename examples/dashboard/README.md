@@ -76,6 +76,18 @@ passphrase or contract-id mismatch the app refuses to start and reports the
 error, so a testnet contract id can never be used against mainnet (or vice
 versa). Make sure Freighter is also set to the same network.
 
+### Contract ID validation
+
+`NEXT_PUBLIC_STREAM_CONTRACT_ID` is validated so a misconfiguration cannot go
+unnoticed:
+
+- **Build time** — `npm run build` (i.e. `next build`) **fails** in production
+  builds when `NEXT_PUBLIC_STREAM_CONTRACT_ID` is missing or is not a valid
+  Stellar contract address. The error message names the required env var.
+- **Startup** — when the app starts, the contract ID format is checked again
+  (valid Stellar contract address: `C...`, 56 characters). An invalid value
+  produces a clear error that names `NEXT_PUBLIC_STREAM_CONTRACT_ID`.
+
 ## Usage
 
 1. Open the app and click **Connect Freighter**, selecting the account you funded.

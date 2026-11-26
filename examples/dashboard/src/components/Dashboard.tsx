@@ -367,16 +367,144 @@ export default function Dashboard() {
           {streams.length === 0 ? (
             <div className="notice">{t("empty", { tab: t(`tabNames.${tab}`) })}</div>
           ) : (
-            <StreamTable
-              tab={tab}
-              streams={streams}
-              busyId={busyId}
-              onWithdraw={doWithdraw}
-            />
+            <>
+              <StreamTable
+                tab={tab}
+                streams={streams}
+                busyId={busyId}
+                selectedId={selectedStreamId}
+                onSelect={setSelectedStreamId}
+                onWithdraw={doWithdraw}
+              />
+              <TransactionHistory
+                streamId={selectedStreamId}
+                events={history}
+                loading={historyLoading}
+                error={historyError}
+                onRetry={() => selectedStreamId && loadHistory(selectedStreamId)}
+              />
+            </>
           )}
         </>
       )}
     </main>
+  );
+}
+
+function EarningsSummary({
+  streams,
+  claimableNow,
+  withdrawnToDate,
+  projectedMonthly,
+  hasSelection,
+}: {
+  streams: StreamRow[];
+  claimableNow: bigint;
+  withdrawnToDate: bigint;
+  projectedMonthly: bigint;
+  hasSelection: boolean;
+}) {
+  if (streams.length === 0) {
+    return (
+      <div className="notice">
+        No employee streams yet — earnings will appear here once you are added to a stream.
+      </div>
+    );
+  }
+  return (
+    <div className="cards">
+      <Stat label="Claimable now" value={formatAmount(claimableNow)} />
+      <Stat label="Withdrawn to date" value={formatAmount(withdrawnToDate)} />
+      <Stat
+        label="Projected monthly"
+        value={hasSelection ? formatAmount(projectedMonthly) : "Select a stream"}
+      />
+    </div>
+  );
+}
+
+function TransactionHistory({
+  streamId,
+  events,
+  loading,
+  error,
+  onRetry,
+}: {
+  streamId: string | null;
+  events: HistoryEvent[];
+  loading: boolean;
+  error: string;
+  onRetry: () => void;
+}) {
+  if (!streamId) {
+    return (
+      <div className="notice">Select a stream to view its transaction history.</div>
+    );
+  }
+
+  const exportCsv = () =>
+    downloadFile(`stream-${streamId}-history.csv`, eventsToCsv(events), "text/csv");
+  const exportJson = () =>
+    downloadFile(
+      `stream-${streamId}-history.json`,
+      JSON.stringify(events, null, 2),
+      "application/json",
+    );
+
+  return (
+    <section style={{ marginTop: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h2 style={{ fontSize: 16 }}>Transaction history · stream {streamId}</h2>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="secondary" onClick={exportCsv} disabled={events.length === 0}>
+            Export CSV
+          </button>
+          <button className="secondary" onClick={exportJson} disabled={events.length === 0}>
+            Export JSON
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="notice">Loading indexed events…</div>
+      ) : error ? (
+        <div className="notice">
+          Transaction history is unavailable right now ({error}).{" "}
+          <button className="secondary" onClick={onRetry}>
+            Retry
+          </button>
+        </div>
+      ) : events.length === 0 ? (
+        <div className="notice">No indexed events for this stream yet.</div>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Details</th>
+              <th>Tx</th>
+            </tr>
+          </thead>
+          <tbody>
+            {events.map((e) => (
+              <tr key={e.id}>
+                <td>{formatEventTime(e.timestamp)}</td>
+                <td>{EVENT_LABELS[e.kind]}</td>
+                <td>
+                  {e.kind === "withdraw" && e.amount ? formatAmount(BigInt(Math.trunc(Number(e.amount)))) : null}
+                  {e.kind === "topup" && e.amount ? `+${formatAmount(BigInt(Math.trunc(Number(e.amount))))}` : null}
+                  {e.kind === "rate_change" && e.rate ? `${formatAmount(BigInt(Math.trunc(Number(e.rate))))}/s` : null}
+                  {e.kind === "status_change" && e.status ? e.status : null}
+                  {!e.amount && !e.rate && !e.status ? "—" : null}
+                </td>
+                <td>{e.txHash ? <code>{shortAddr(e.txHash)}</code> : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 
@@ -393,11 +521,15 @@ function StreamTable({
   tab,
   streams,
   busyId,
+  selectedId,
+  onSelect,
   onWithdraw,
 }: {
   tab: Tab;
   streams: StreamRow[];
   busyId: string | null;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
   onWithdraw: (id: bigint) => void;
 }) {
   const t = useTranslations("Dashboard");
@@ -416,7 +548,14 @@ function StreamTable({
       </thead>
       <tbody>
         {streams.map((s) => (
-          <tr key={s.id.toString()}>
+          <tr
+            key={s.id.toString()}
+            onClick={() => onSelect(s.id.toString())}
+            style={{
+              cursor: "pointer",
+              background: selectedId === s.id.toString() ? "rgba(0,0,0,0.05)" : undefined,
+            }}
+          >
             <td>{s.id.toString()}</td>
             <td>
               <code>{shortAddr(tab === "employer" ? s.employee : s.employer)}</code>
