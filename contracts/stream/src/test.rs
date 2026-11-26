@@ -287,6 +287,51 @@ fn test_protocol_fee_defaults_to_zero() {
     assert_eq!(client.get_protocol_fee(), (0, None));
 }
 
+// ---------------------------------------------------------------------------
+// TEST-52 (#567) – protocol fee disabled (0 bps): full deposit locked,
+// nothing transferred to treasury, get_protocol_fee_config() returns None.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_protocol_fee_disabled_locks_full_deposit_and_transfers_nothing() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let employer = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let token_id = setup_token(&env, &employer);
+    let token = paystream_token::TokenContractClient::new(&env, &token_id);
+
+    client.initialize(&admin);
+
+    // Default config: fee disabled, no treasury configured.
+    assert!(client.get_protocol_fee_config().is_none());
+
+    let employer_before = token.balance(&employer);
+    let treasury_before = token.balance(&treasury);
+
+    let gross: i128 = 10_000;
+    let stream_id =
+        client.create_stream(&employer, &employee, &token_id, &gross, &10, &0, &None, &None);
+
+    // The full gross deposit is locked in the stream — no fee is skimmed.
+    let s = client.get_stream(&stream_id);
+    assert_eq!(s.deposit, gross, "full deposit must be locked when fee is 0 bps");
+    assert_eq!(s.withdrawn, 0);
+
+    // Employer paid exactly the gross amount; treasury received nothing.
+    assert_eq!(token.balance(&employer), employer_before - gross);
+    assert_eq!(
+        token.balance(&treasury),
+        treasury_before,
+        "no treasury transfer may happen when the fee is disabled"
+    );
+    assert_eq!(token.balance(&client.address), gross);
+
+    // The public fee-config query reports the fee as disabled.
+    assert!(client.get_protocol_fee_config().is_none());
+}
+
 #[test]
 #[should_panic(expected = "protocol fee cannot exceed 100 basis points")]
 fn test_protocol_fee_above_one_percent_is_rejected() {
@@ -2862,6 +2907,58 @@ fn test_stream_count_by_token_single_stream() {
 }
 
 /// Token indexes include single and batch-created streams without mixing tokens.
+// ---------------------------------------------------------------------------
+// SC-93 (#461) – archived index entries keep queries correct
+// ---------------------------------------------------------------------------
+
+/// Completed streams can have their index entries archived; the index queries
+/// must still return the correct IDs for the live (non-archived) streams.
+#[test]
+fn test_archived_stream_index_queries_still_correct() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let employer = Address::generate(&env);
+    let employee = Address::generate(&env);
+    let token_id = setup_token(&env, &employer);
+
+    client.initialize(&admin);
+    client.set_min_deposit(&admin, &0, &100);
+
+    let active_id = client.create_stream(&employer, &employee, &token_id, &10_000, &10, &0, &None, &None);
+    let completed_id = client.create_stream(&employer, &employee, &token_id, &500, &10, &0, &None, &None);
+
+    // Exhaust the second stream so it becomes a candidate for archival.
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    client.withdraw(&employee, &completed_id);
+    assert_eq!(client.get_stream(&completed_id).status, StreamStatus::Exhausted);
+
+    // Archive the completed stream's index entries.
+    client.archive_stream_indexes(&admin, &completed_id);
+
+    // Queries still return the correct IDs: the active stream remains indexed,
+    // the archived stream is no longer listed but is still retrievable.
+    let employer_ids = client.stream_ids_by_employer(&employer);
+    assert!(employer_ids.contains(active_id));
+    assert!(!employer_ids.contains(completed_id));
+
+    let employee_ids = client.stream_ids_by_employee(&employee);
+    assert!(employee_ids.contains(active_id));
+    assert!(!employee_ids.contains(completed_id));
+
+    let token_ids = client.stream_ids_by_token(&token_id);
+    assert!(token_ids.contains(active_id));
+    assert!(!token_ids.contains(completed_id));
+
+    assert_eq!(client.stream_count_by_employer(&employer), 1);
+    assert_eq!(client.stream_count_by_employee(&employee), 1);
+    assert_eq!(client.stream_count_by_token(&token_id), 1);
+
+    // The archived stream itself is untouched and still readable.
+    let s = client.get_stream(&completed_id);
+    assert_eq!(s.status, StreamStatus::Exhausted);
+    assert_eq!(s.employer, employer);
+}
+
 #[test]
 fn test_stream_count_by_token_multiple_tokens_and_batch() {
     use crate::types::StreamParams;
